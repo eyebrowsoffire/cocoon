@@ -70,7 +70,7 @@ mixin FirestoreQueries {
   Future<Document> getDocument(String name, {Transaction? transaction});
   @protected
   @visibleForTesting
-  Future<List<Document>> batchGetDocuments(
+  Future<BatchGetDocumentsResponse> batchGetDocuments(
     List<String> names, {
     Transaction? transaction,
   });
@@ -191,7 +191,9 @@ mixin FirestoreQueries {
         .toList();
 
     final transaction = await beginTransaction();
-    final docs = await batchGetDocuments(docIds, transaction: transaction);
+    final response = await batchGetDocuments(docIds, transaction: transaction);
+    final docs =
+        response.map((element) => element.found).whereType<Document>();
     final tasksToUpdate = <Task>[];
 
     for (final doc in docs) {
@@ -382,7 +384,9 @@ mixin FirestoreQueries {
               ),
             )
             .toList();
-        final documents = await batchGetDocuments(missingNames);
+        final response = await batchGetDocuments(missingNames);
+        final documents =
+            response.map((element) => element.found).whereType<Document>();
         final fetchedMissingTasks = documents.map(Task.fromDocument).toList();
         if (fetchedMissingTasks.isNotEmpty) {
           await _taskCache!.cacheTaskPayloads(fetchedMissingTasks);
@@ -623,9 +627,11 @@ class FirestoreService with FirestoreQueries {
     );
   }
 
-  /// Gets multiple documents based on a list of names in a single batch request.
+  /// Batch gets documents by [names].
+  ///
+  /// Unlike [getDocument], Firestore returns 200 OK even if documents are missing.
   @override
-  Future<List<Document>> batchGetDocuments(
+  Future<BatchGetDocumentsResponse> batchGetDocuments(
     List<String> names, {
     Transaction? transaction,
   }) async {
@@ -634,14 +640,19 @@ class FirestoreService with FirestoreQueries {
       documents: names,
       transaction: transaction?.identifier,
     );
-    final response = await _api.projects.databases.documents.batchGet(
-      request,
-      kDatabase,
-    );
-    return response
-        .map((element) => element.found)
-        .whereType<Document>()
-        .toList();
+    return _api.projects.databases.documents.batchGet(request, kDatabase);
+  }
+
+  /// Gets a document based on [name], or returns `null` if the document does not exist.
+  ///
+  /// Uses [batchGetDocuments] so that non-existent documents do not produce 404
+  /// errors in Firestore / GCP monitoring logs.
+  Future<Document?> getDocumentOrNull(
+    String name, {
+    Transaction? transaction,
+  }) async {
+    final response = await batchGetDocuments([name], transaction: transaction);
+    return response.firstOrNull?.found;
   }
 
   /// Creates a document.

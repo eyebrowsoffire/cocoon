@@ -13,6 +13,7 @@ import 'package:googleapis/firestore/v1.dart' hide Status;
 import 'package:meta/meta.dart';
 
 import '../../model/common/failed_presubmit_jobs.dart';
+import '../../model/common/presubmit_completed_check.dart';
 import '../../model/common/presubmit_guard_conclusion.dart';
 import '../../model/common/presubmit_job_state.dart';
 import '../../model/firestore/base.dart';
@@ -31,10 +32,11 @@ final class UnifiedCheckRun {
     required List<String> tasks,
     required Config config,
     PullRequest? pullRequest,
-    CheckRun? checkRun,
+    CheckRun? dashboardChecks,
+    CheckRun? mergeQueueGuard,
     @visibleForTesting DateTime Function() utcNow = DateTime.timestamp,
   }) async {
-    if (checkRun != null &&
+    if (dashboardChecks != null &&
         pullRequest != null &&
         config.flags.isUnifiedCheckRunFlowEnabledForUser(
           pullRequest.user!.login!,
@@ -48,7 +50,8 @@ final class UnifiedCheckRun {
       // was succeeded so we are interested in a state of the latest one.
       final creationTime = utcNow().millisecondsSinceEpoch;
       final guard = PresubmitGuard(
-        checkRun: checkRun,
+        checkRun: dashboardChecks,
+        checkRunGuard: mergeQueueGuard,
         headSha: sha,
         slug: slug,
         prNum: pullRequest.number!,
@@ -64,7 +67,7 @@ final class UnifiedCheckRun {
           PresubmitJob.init(
             slug: slug,
             jobName: task,
-            checkRunId: checkRun.id!,
+            checkRunId: dashboardChecks.id!,
             creationTime: creationTime,
           ),
       ];
@@ -79,7 +82,7 @@ final class UnifiedCheckRun {
         sha: sha,
         stage: stage,
         tasks: tasks,
-        checkRunGuard: checkRun != null ? '$checkRun' : '',
+        checkRunGuard: mergeQueueGuard != null ? '$mergeQueueGuard' : '',
       );
     }
   }
@@ -163,7 +166,7 @@ final class UnifiedCheckRun {
           '$logCrumb: results = ${response.writeResults?.map((e) => e.toJson())}',
         );
         return FailedJobsForRerun(
-          checkRunGuard: latestGuard.checkRun,
+          dashboardChecks: latestGuard.checkRun,
           jobRetries: checkRetries,
           stage: latestGuard.stage,
         );
@@ -247,12 +250,66 @@ final class UnifiedCheckRun {
         '$logCrumb: results = ${response.writeResults?.map((e) => e.toJson())}',
       );
       return FailedJobsForRerun(
-        checkRunGuard: guard.checkRun,
+        dashboardChecks: guard.checkRun,
         jobRetries: {jobName: (latestCheck?.attemptNumber ?? 0) + 1},
         stage: guard.stage,
       );
     } catch (e) {
       log.info('$logCrumb: failed to update presubmit job', e);
+      rethrow;
+    }
+  }
+
+  /// Re-initializes an in-progress job that is being automatically rescheduled.
+  static Future<int> reInitializeInProgressJob({
+    required FirestoreService firestoreService,
+    required PresubmitCompletedJob completedJob,
+    @visibleForTesting DateTime Function() utcNow = DateTime.timestamp,
+  }) async {
+    final prNum = completedJob.prNum;
+    final logCrumb =
+        'reInitializeInProgressJob(${completedJob.slug.fullName}, $prNum, ${completedJob.checkRunId}, ${completedJob.name})';
+
+    log.info('$logCrumb Re-initializing in-progress job.');
+
+    final transaction = await firestoreService.beginTransaction();
+    try {
+      final checkDocName = PresubmitJob.documentNameFor(
+        slug: completedJob.slug,
+        checkRunId: completedJob.checkRunId,
+        jobName: completedJob.name,
+        attemptNumber: completedJob.attempt,
+      );
+      final currentJobDocument = await firestoreService.getDocument(
+        checkDocName,
+        transaction: transaction,
+      );
+      final currentJob = PresubmitJob.fromDocument(currentJobDocument);
+
+      final creationTime = utcNow().millisecondsSinceEpoch;
+      final newJob = PresubmitJob.init(
+        slug: currentJob.slug,
+        jobName: currentJob.jobName,
+        checkRunId: currentJob.checkRunId,
+        creationTime: creationTime,
+        attemptNumber: currentJob.attemptNumber + 1,
+      );
+
+      currentJob.status = TaskStatus.failed;
+      if (completedJob.endTime != null) {
+        currentJob.endTime = completedJob.endTime!;
+      }
+      currentJob.summary = completedJob.summary;
+
+      await firestoreService.commit(transaction, [
+        ...documentsToWrites([currentJob], exists: true),
+        ...documentsToWrites([newJob], exists: false),
+      ]);
+      log.info('$logCrumb: successfully re-initialized in-progress job.');
+      return newJob.attemptNumber;
+    } catch (e) {
+      log.info('$logCrumb: failed to re-initialize in-progress job', e);
+      await firestoreService.rollback(transaction);
       rethrow;
     }
   }
@@ -559,7 +616,8 @@ final class UnifiedCheckRun {
         return PresubmitGuardConclusion(
           result: PresubmitGuardConclusionResult.missing,
           remaining: presubmitGuard.remainingJobs,
-          checkRunGuard: presubmitGuard.checkRunJson,
+          dashboardChecks: presubmitGuard.checkRunJson,
+          mergeQueueGuard: presubmitGuard.checkRunGuardJson,
           failed: presubmitGuard.failedJobs,
           summary:
               'Check run "${state.jobName}" not present in ${guardId.stage} CI stage',
@@ -612,11 +670,15 @@ final class UnifiedCheckRun {
           // So if the test existed and either remaining or failed_count is changed;
           // the response is valid.
           if (state.status.isComplete) {
-            // Guard against going negative and log enough info so we can debug.
-            if (remaining == 0) {
-              throw '$logCrumb: field "${PresubmitGuard.fieldRemainingJobs}" is already zero for $transaction / ${presubmitGuardDocument.fields}';
+            // If remaining is 0 we should not decrement it and we should log
+            // this fact.
+            if (remaining > 0) {
+              remaining -= 1;
+            } else {
+              log.error(
+                '$logCrumb: field "${PresubmitGuard.fieldRemainingJobs}" is already zero for $transaction / ${presubmitGuardDocument.fields}',
+              );
             }
-            remaining -= 1;
             valid = true;
           }
 
@@ -654,7 +716,8 @@ final class UnifiedCheckRun {
         return PresubmitGuardConclusion(
           result: PresubmitGuardConclusionResult.internalError,
           remaining: -1,
-          checkRunGuard: null,
+          dashboardChecks: null,
+          mergeQueueGuard: null,
           failed: failed,
           summary: 'Internal server error',
           details:
@@ -689,7 +752,8 @@ $stack
             ? PresubmitGuardConclusionResult.ok
             : PresubmitGuardConclusionResult.internalError,
         remaining: remaining,
-        checkRunGuard: presubmitGuard.checkRunJson,
+        dashboardChecks: presubmitGuard.checkRunJson,
+        mergeQueueGuard: presubmitGuard.checkRunGuardJson,
         failed: failed,
         failedJobNames: valid ? presubmitGuard.failedJobNames : const [],
         summary: valid

@@ -6,11 +6,14 @@ import 'package:buildbucket/buildbucket_pb.dart' as bbv2;
 import 'package:cocoon_common_test/cocoon_common_test.dart';
 import 'package:cocoon_integration_test/testing.dart';
 import 'package:cocoon_server/logging.dart';
+import 'package:cocoon_server_test/mocks.dart';
 import 'package:cocoon_server_test/test_logging.dart';
 import 'package:cocoon_service/src/model/commit_ref.dart';
 import 'package:cocoon_service/src/model/firestore/base.dart';
 import 'package:cocoon_service/src/model/firestore/pr_check_runs.dart';
+import 'package:cocoon_service/src/model/firestore/presubmit_guard.dart';
 import 'package:cocoon_service/src/service/cache_service.dart';
+import 'package:cocoon_service/src/service/firestore.dart';
 import 'package:cocoon_service/src/service/flags/dynamic_config.dart';
 import 'package:cocoon_service/src/service/flags/ordered_presubmit_flags.dart';
 import 'package:cocoon_service/src/service/flags/unified_check_run_flow_flags.dart';
@@ -439,7 +442,7 @@ void main() {
             engineArtifacts: EngineArtifacts.builtFromSource(
               commitSha: pullRequest.head!.sha!,
             ),
-            checkRunGuard: checkRunGuard,
+            dashboardChecks: checkRunGuard,
             stage: CiStage.fusionTests,
           ),
           completion([isTarget.hasName('Linux foo')]),
@@ -513,7 +516,7 @@ void main() {
           engineArtifacts: EngineArtifacts.builtFromSource(
             commitSha: pullRequest.head!.sha!,
           ),
-          checkRunGuard: null, // No guard provided
+          dashboardChecks: null, // No guard provided
         ),
         completion([isTarget.hasName('Linux foo')]),
       );
@@ -528,6 +531,16 @@ void main() {
         ),
       ).called(1);
 
+      verifyNever(
+        mockGithubChecksUtil.updateCheckRun(
+          any,
+          any,
+          any,
+          status: anyNamed('status'),
+          conclusion: anyNamed('conclusion'),
+        ),
+      );
+
       final bbv2.ScheduleBuildRequest scheduleBuild;
       {
         final batchRequest = bbv2.BatchRequest().createEmptyInstance();
@@ -541,6 +554,242 @@ void main() {
       expect(userData.checkRunId, 456);
       expect(userData.guardCheckRunId, isNull);
     });
+
+    test(
+      'does not update dashboard checks when unified flow is disabled',
+      () async {
+        final pullRequest = generatePullRequest(
+          id: 1,
+          repo: 'flutter',
+          headSha: 'headsha123',
+        );
+
+        final buildTarget = generateTarget(
+          1,
+          properties: {'os': 'abc'},
+          slug: RepositorySlug.full('flutter/flutter'),
+          name: 'Linux foo',
+        );
+
+        // Disable Unified Check Run Flow but provide a guard (unexpected but should be handled)
+        luci = LuciBuildService(
+          config: FakeConfig(
+            dynamicConfig: DynamicConfig(
+              unifiedCheckRunFlow: UnifiedCheckRunFlow(useForAll: false),
+            ),
+          ),
+          cache: CacheService.inMemory(),
+          buildBucketClient: mockBuildBucketClient,
+          githubChecksUtil: mockGithubChecksUtil,
+          pubsub: pubSub,
+          gerritService: gerritService,
+          firestore: firestore,
+        );
+
+        final checkRunGuard = generateCheckRun(1234, name: 'Guard');
+
+        when(
+          mockGithubChecksUtil.createCheckRun(any, any, any, any),
+        ).thenAnswer((_) async => generateCheckRun(456, name: 'Linux foo'));
+
+        await expectLater(
+          luci.scheduleTryBuilds(
+            pullRequest: pullRequest,
+            targets: [buildTarget],
+            engineArtifacts: EngineArtifacts.builtFromSource(
+              commitSha: pullRequest.head!.sha!,
+            ),
+            dashboardChecks: checkRunGuard, // Pass guard even though disabled
+          ),
+          completion([isTarget.hasName('Linux foo')]),
+        );
+
+        // Should NOT update dashboard checks
+        verifyNever(
+          mockGithubChecksUtil.updateCheckRun(
+            any,
+            any,
+            any,
+            status: anyNamed('status'),
+            conclusion: anyNamed('conclusion'),
+          ),
+        );
+
+        // Should create individual check run because unified flow is disabled
+        verify(
+          mockGithubChecksUtil.createCheckRun(
+            any,
+            RepositorySlug.full('flutter/flutter'),
+            'headsha123',
+            'Linux foo',
+          ),
+        ).called(1);
+      },
+    );
+
+    test(
+      'reRequests check run for re-run failed checks when failedJobs is 0',
+      () async {
+        final pullRequest = generatePullRequest(
+          id: 1,
+          repo: 'flutter',
+          headSha: 'headsha123',
+        );
+
+        final buildTarget = generateTarget(
+          1,
+          properties: {'os': 'abc'},
+          slug: RepositorySlug.full('flutter/flutter'),
+          name: 'Linux foo',
+        );
+
+        final mockGithubClient = MockGitHub();
+        final mockChecksService = MockChecksService();
+        final mockCheckRunsService = MockCheckRunsService();
+
+        when(mockGithubClient.checks).thenReturn(mockChecksService);
+        when(mockChecksService.checkRuns).thenReturn(mockCheckRunsService);
+
+        luci = LuciBuildService(
+          config: FakeConfig(
+            githubClient: mockGithubClient,
+            dynamicConfig: DynamicConfig(
+              unifiedCheckRunFlow: UnifiedCheckRunFlow(useForAll: true),
+            ),
+          ),
+          cache: CacheService.inMemory(),
+          buildBucketClient: mockBuildBucketClient,
+          githubChecksUtil: mockGithubChecksUtil,
+          pubsub: pubSub,
+          gerritService: gerritService,
+          firestore: firestore,
+        );
+
+        final checkRunGuard = generateCheckRun(1234, name: 'Guard');
+
+        final guard = PresubmitGuard(
+          checkRun: checkRunGuard,
+          headSha: 'headsha123',
+          slug: RepositorySlug.full('flutter/flutter'),
+          prNum: pullRequest.number!,
+          stage: CiStage.fusionTests,
+          creationTime: 123456789,
+          author: 'dash',
+          remainingJobs: 1,
+          failedJobs: 0,
+        );
+        await firestore.writeViaTransaction(
+          documentsToWrites([guard], exists: false),
+        );
+
+        await expectLater(
+          luci.reScheduleTryBuilds(
+            pullRequest: pullRequest,
+            targets: {buildTarget: 2},
+            engineArtifacts: EngineArtifacts.builtFromSource(
+              commitSha: pullRequest.head!.sha!,
+            ),
+            dashboardChecks: checkRunGuard,
+            stage: CiStage.fusionTests,
+          ),
+          completion([isTarget.hasName('Linux foo')]),
+        );
+
+        verify(
+          mockCheckRunsService.reRequestCheckRun(
+            RepositorySlug.full('flutter/flutter'),
+            checkRunId: 1234,
+          ),
+        ).called(1);
+      },
+    );
+
+    test(
+      'does not reRequest check run for re-run failed checks when failedJobs > 0',
+      () async {
+        final pullRequest = generatePullRequest(
+          id: 1,
+          repo: 'flutter',
+          headSha: 'headsha123',
+        );
+
+        final buildTarget = generateTarget(
+          1,
+          properties: {'os': 'abc'},
+          slug: RepositorySlug.full('flutter/flutter'),
+          name: 'Linux foo',
+        );
+
+        final mockGithubClient = MockGitHub();
+        final mockChecksService = MockChecksService();
+        final mockCheckRunsService = MockCheckRunsService();
+
+        when(mockGithubClient.checks).thenReturn(mockChecksService);
+        when(mockChecksService.checkRuns).thenReturn(mockCheckRunsService);
+
+        luci = LuciBuildService(
+          config: FakeConfig(
+            githubClient: mockGithubClient,
+            dynamicConfig: DynamicConfig(
+              unifiedCheckRunFlow: UnifiedCheckRunFlow(useForAll: true),
+            ),
+          ),
+          cache: CacheService.inMemory(),
+          buildBucketClient: mockBuildBucketClient,
+          githubChecksUtil: mockGithubChecksUtil,
+          pubsub: pubSub,
+          gerritService: gerritService,
+          firestore: firestore,
+        );
+
+        final checkRunGuard = generateCheckRun(1234, name: 'Guard');
+
+        final guard = PresubmitGuard(
+          checkRun: checkRunGuard,
+          headSha: 'headsha123',
+          slug: RepositorySlug.full('flutter/flutter'),
+          prNum: pullRequest.number!,
+          stage: CiStage.fusionTests,
+          creationTime: 123456789,
+          author: 'dash',
+          remainingJobs: 1,
+          failedJobs: 1,
+        );
+        await firestore.writeViaTransaction(
+          documentsToWrites([guard], exists: false),
+        );
+
+        await expectLater(
+          luci.reScheduleTryBuilds(
+            pullRequest: pullRequest,
+            targets: {buildTarget: 2},
+            engineArtifacts: EngineArtifacts.builtFromSource(
+              commitSha: pullRequest.head!.sha!,
+            ),
+            dashboardChecks: checkRunGuard,
+            stage: CiStage.fusionTests,
+          ),
+          completion([isTarget.hasName('Linux foo')]),
+        );
+
+        verifyNever(
+          mockCheckRunsService.reRequestCheckRun(
+            any,
+            checkRunId: anyNamed('checkRunId'),
+          ),
+        );
+
+        verifyNever(
+          mockGithubChecksUtil.updateCheckRun(
+            any,
+            any,
+            any,
+            status: anyNamed('status'),
+            conclusion: anyNamed('conclusion'),
+          ),
+        );
+      },
+    );
   });
 
   group('Ordered Presubmit', () {

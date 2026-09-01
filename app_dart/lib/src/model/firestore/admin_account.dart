@@ -9,32 +9,33 @@ import '../../service/firestore.dart';
 import 'base.dart';
 
 /// Describes an authenticated account.
-final class Account extends AppDocument<Account> {
+final class AdminAccount extends AppDocument<AdminAccount> {
   /// Description of the document in Firestore.
   static final metadata = AppDocumentMetadata(
-    collectionId: 'accounts',
-    fromDocument: Account.fromDocument,
+    collectionId: 'admin_accounts',
+    fromDocument: AdminAccount.fromDocument,
   );
 
   @override
-  AppDocumentMetadata<Account> get runtimeMetadata => Account.metadata;
+  AppDocumentMetadata<AdminAccount> get runtimeMetadata =>
+      AdminAccount.metadata;
 
   /// Retrieves the account by email.
   ///
   /// Returns `null` if the account does not exist.
-  static Future<Account?> getByEmail(
+  static Future<AdminAccount?> getByEmail(
     FirestoreService firestore, {
     required String email,
   }) async {
     final document = await firestore.getDocumentOrNull(
       p.posix.join(kDatabase, 'documents', metadata.collectionId, email),
     );
-    return document == null ? null : Account.fromDocument(document);
+    return document == null ? null : AdminAccount.fromDocument(document);
   }
 
   /// Creates a new account with the given [email].
-  factory Account({required String email}) {
-    return Account.fromDocument(
+  factory AdminAccount({required String email}) {
+    return AdminAccount.fromDocument(
       g.Document(
         name: p.posix.join(
           kDatabase,
@@ -46,7 +47,7 @@ final class Account extends AppDocument<Account> {
     );
   }
 
-  Account.fromDocument(super.document);
+  AdminAccount.fromDocument(super.document);
 
   /// Email address of the account.
   String get email => p.posix.basename(name!);

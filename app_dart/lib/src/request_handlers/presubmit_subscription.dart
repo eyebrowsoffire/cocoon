@@ -19,6 +19,7 @@ import '../model/common/presubmit_completed_check.dart';
 import '../request_handling/exceptions.dart';
 import '../request_handling/subscription_handler.dart';
 import '../service/extensions/cache_service_test_suppression.dart';
+import '../service/firestore/unified_check_run.dart';
 import '../service/luci_build_service/build_tags.dart';
 import '../service/luci_build_service/user_data.dart';
 import '../service/scheduler/ci_yaml_fetcher.dart';
@@ -164,6 +165,17 @@ base class PresubmitSubscription extends SubscriptionHandler {
       if (tagSet.currentAttempt < maxAttempt) {
         rescheduled = true;
         log.info('Rerunning failed task: $builderName');
+        if (isUnifiedCheckRun) {
+          await UnifiedCheckRun.reInitializeInProgressJob(
+            firestoreService: _firestore,
+            completedJob: PresubmitCompletedJob.fromBuild(
+              build,
+              userData,
+              summaryPrepend:
+                  '### ⚠️ Test failed but automatically rescheduled',
+            ),
+          );
+        }
         await _luciBuildService.reschedulePresubmitBuild(
           builderName: builderName,
           build: build,
@@ -173,21 +185,21 @@ base class PresubmitSubscription extends SubscriptionHandler {
       }
     }
     CheckRunConclusion? override;
-    if (!isUnifiedCheckRun) {
-      String? suppressedMessage;
-      if (build.status.isTaskFailed() && !rescheduled) {
-        // If a test is suppressed; we avoid setting a failing status.
-        final isSuppressed = await cache.isTestSuppressed(
-          testName: builderName,
-          repository: userData.commit.slug,
-          firestore: _firestore,
-        );
-        if (isSuppressed) {
-          override = CheckRunConclusion.neutral;
-          suppressedMessage =
-              '### ⚠️ Test failed but marked as suppressed on dashboard';
-        }
+    String? suppressedMessage;
+    if (build.status.isTaskFailed() && !rescheduled) {
+      // If a test is suppressed; we avoid setting a failing status.
+      final isSuppressed = await cache.isTestSuppressed(
+        testName: builderName,
+        repository: userData.commit.slug,
+        firestore: _firestore,
+      );
+      if (isSuppressed) {
+        override = CheckRunConclusion.neutral;
+        suppressedMessage =
+            '### ⚠️ Test failed but marked as suppressed on dashboard';
       }
+    }
+    if (!isUnifiedCheckRun) {
       if (userData.checkRunId == null) {
         log.error('checkRunId is null for non-unified check run');
         return;
@@ -209,6 +221,7 @@ base class PresubmitSubscription extends SubscriptionHandler {
         status: override == CheckRunConclusion.neutral
             ? TaskStatus.neutral
             : null,
+        summaryPrepend: suppressedMessage,
       );
       await _scheduler.processCheckRunCompleted(check);
     }

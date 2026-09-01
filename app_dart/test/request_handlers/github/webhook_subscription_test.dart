@@ -3,7 +3,6 @@
 // found in the LICENSE file.
 
 import 'dart:async';
-import 'dart:io';
 
 import 'package:buildbucket/buildbucket_pb.dart' as bbv2;
 import 'package:cocoon_common/core_extensions.dart';
@@ -12,21 +11,13 @@ import 'package:cocoon_integration_test/testing.dart';
 import 'package:cocoon_server/logging.dart';
 import 'package:cocoon_server_test/mocks.dart';
 import 'package:cocoon_server_test/test_logging.dart';
-import 'package:cocoon_service/src/model/firestore/base.dart';
+import 'package:cocoon_service/cocoon_service.dart';
 import 'package:cocoon_service/src/model/firestore/ci_staging.dart';
 import 'package:cocoon_service/src/model/firestore/commit.dart' as fs;
-import 'package:cocoon_service/src/model/firestore/pr_check_runs.dart';
 import 'package:cocoon_service/src/model/github/checks.dart' hide CheckRun;
-import 'package:cocoon_service/src/request_handlers/github/webhook_subscription.dart';
 import 'package:cocoon_service/src/request_handling/exceptions.dart';
 import 'package:cocoon_service/src/service/big_query.dart';
-import 'package:cocoon_service/src/service/cache_service.dart';
-import 'package:cocoon_service/src/service/config.dart';
-import 'package:cocoon_service/src/service/flags/dynamic_config.dart';
-import 'package:cocoon_service/src/service/flags/unified_check_run_flow_flags.dart';
 import 'package:cocoon_service/src/service/github_service.dart';
-import 'package:cocoon_service/src/service/pull_request_manager.dart';
-import 'package:cocoon_service/src/service/scheduler.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:github/github.dart' hide Branch;
 import 'package:googleapis/bigquery/v2.dart';
@@ -72,6 +63,8 @@ void main() {
   const kReleaseHeadRef = 'cherrypicks-flutter-2.12-candidate.4';
 
   late DateTime fakeNow;
+  late TestSuppression suppressionService;
+  late IssueService issueService;
 
   setUp(() {
     request = FakeHttpRequest();
@@ -170,6 +163,11 @@ void main() {
 
     fakeNow = DateTime.now();
     cache = CacheService.inMemory();
+    suppressionService = TestSuppression(firestore: firestore, cache: cache);
+    issueService = IssueService(
+      firestore: firestore,
+      suppressionService: suppressionService,
+    );
     webhook = GithubWebhookSubscription(
       config: config,
       cache: cache,
@@ -177,6 +175,7 @@ void main() {
       scheduler: scheduler,
       commitService: commitService,
       firestore: firestore,
+      issueService: issueService,
       pullRequestLabelProcessorProvider:
           ({
             required Config config,
@@ -2968,72 +2967,7 @@ void foo() {
     });
 
     group('PullRequestLabelProcessor.processLabels', () {
-      test(
-        'applies emergency label on approved PRs (Merge Queue Guard only)',
-        () async {
-          final pullRequest = generatePullRequest(
-            number: 123,
-            headSha: '6dcb09b5b57875f334f61aebed695e2e4193db5e',
-            labels: [IssueLabel(name: 'emergency')],
-          );
-
-          githubService.checkRunsMock = '''{
-  "total_count": 1,
-  "check_runs": [
-    {
-      "id": 2,
-      "head_sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
-      "external_id": "",
-      "details_url": "https://example.com",
-      "status": "in_progress",
-      "started_at": "2018-05-04T01:14:52Z",
-      "name": "Merge Queue Guard",
-      "check_suite": {
-        "id": 5
-      }
-    }
-  ]
-}''';
-
-          final pullRequestLabelProcessor = PullRequestLabelProcessor(
-            config: config,
-            githubService: githubService,
-            pullRequest: pullRequest,
-          );
-
-          await pullRequestLabelProcessor.processLabels();
-
-          expect(
-            log,
-            bufferedLoggerOf(
-              containsAll([
-                logThat(
-                  message: equals(
-                    'PullRequestLabelProcessor(flutter/flutter/pull/123): attempting to unlock the Merge Queue Guard for emergency',
-                  ),
-                ),
-                logThat(
-                  message: equals(
-                    'PullRequestLabelProcessor(flutter/flutter/pull/123): unlocked "Merge Queue Guard", allowing it to land as an emergency.',
-                  ),
-                ),
-                logThat(
-                  message: equals(
-                    'PullRequestLabelProcessor(flutter/flutter/pull/123): attempting to unlock the Dashboard Checks for emergency',
-                  ),
-                ),
-                logThat(
-                  message: equals(
-                    'PullRequestLabelProcessor(flutter/flutter/pull/123): failed to process the emergency label. "Dashboard Checks" check run is missing.',
-                  ),
-                ),
-              ]),
-            ),
-          );
-        },
-      );
-
-      test('applies emergency label on approved PRs (Dashboard Checks only)', () async {
+      test('applies emergency label on approved PRs', () async {
         final pullRequest = generatePullRequest(
           number: 123,
           headSha: '6dcb09b5b57875f334f61aebed695e2e4193db5e',
@@ -3044,13 +2978,13 @@ void foo() {
   "total_count": 1,
   "check_runs": [
     {
-      "id": 3,
+      "id": 2,
       "head_sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
       "external_id": "",
       "details_url": "https://example.com",
       "status": "in_progress",
       "started_at": "2018-05-04T01:14:52Z",
-      "name": "Dashboard Checks",
+      "name": "Merge Queue Guard",
       "check_suite": {
         "id": 5
       }
@@ -3077,17 +3011,7 @@ void foo() {
               ),
               logThat(
                 message: equals(
-                  'PullRequestLabelProcessor(flutter/flutter/pull/123): failed to process the emergency label. "Merge Queue Guard" check run is missing.',
-                ),
-              ),
-              logThat(
-                message: equals(
-                  'PullRequestLabelProcessor(flutter/flutter/pull/123): attempting to unlock the Dashboard Checks for emergency',
-                ),
-              ),
-              logThat(
-                message: equals(
-                  'PullRequestLabelProcessor(flutter/flutter/pull/123): unlocked "Dashboard Checks", allowing it to land as an emergency.',
+                  'PullRequestLabelProcessor(flutter/flutter/pull/123): unlocked "Merge Queue Guard", allowing it to land as an emergency.',
                 ),
               ),
             ]),
@@ -3142,16 +3066,6 @@ void foo() {
                 logThat(
                   message: contains(
                     'failed to process the emergency label. "Merge Queue Guard" check run is missing.',
-                  ),
-                ),
-                logThat(
-                  message: contains(
-                    'attempting to unlock the Dashboard Checks for emergency',
-                  ),
-                ),
-                logThat(
-                  message: contains(
-                    'failed to process the emergency label. "Dashboard Checks" check run is missing.',
                   ),
                 ),
               ]),
@@ -3363,6 +3277,80 @@ void foo() {
       await tester.post(webhook);
 
       verify(commitService.handleCreateGithubRequest(any)).called(1);
+    });
+  });
+
+  group('github webhook issues event', () {
+    test('handles issues closed event to unsuppress tests', () async {
+      const issueLink = 'https://github.com/flutter/flutter/issues/999';
+      final testDoc = SuppressedTest(
+        name: 'Linux fu',
+        repository: 'flutter/flutter',
+        issueLink: issueLink,
+        isSuppressed: true,
+        createTimestamp: DateTime.utc(2026, 1, 1),
+      );
+      await firestore.createDocument(
+        testDoc,
+        collectionId: SuppressedTest.kCollectionId,
+      );
+
+      tester.message = generateIssueMessage(
+        action: 'closed',
+        htmlUrl: issueLink,
+        login: 'octocat',
+      );
+
+      await tester.post(webhook);
+
+      final latest = await SuppressedTest.getLatest(
+        firestore,
+        'flutter/flutter',
+        'Linux fu',
+      );
+      expect(latest, isNotNull);
+      expect(latest!.isSuppressed, isFalse);
+      expect(latest.updates.last['user'], 'octocat');
+      expect(
+        latest.updates.last['note'],
+        contains('Automatic unsuppression: issue $issueLink was closed.'),
+      );
+    });
+
+    test('handles issues reopened event to re-suppress tests', () async {
+      const issueLink = 'https://github.com/flutter/flutter/issues/999';
+      final testDoc = SuppressedTest(
+        name: 'Linux fu',
+        repository: 'flutter/flutter',
+        issueLink: issueLink,
+        isSuppressed: false,
+        createTimestamp: DateTime.utc(2026, 1, 1),
+      );
+      await firestore.createDocument(
+        testDoc,
+        collectionId: SuppressedTest.kCollectionId,
+      );
+
+      tester.message = generateIssueMessage(
+        action: 'reopened',
+        htmlUrl: issueLink,
+        login: 'octocat',
+      );
+
+      await tester.post(webhook);
+
+      final latest = await SuppressedTest.getLatest(
+        firestore,
+        'flutter/flutter',
+        'Linux fu',
+      );
+      expect(latest, isNotNull);
+      expect(latest!.isSuppressed, isTrue);
+      expect(latest.updates.last['user'], 'octocat');
+      expect(
+        latest.updates.last['note'],
+        contains('Automatic re-suppression: issue $issueLink was reopened.'),
+      );
     });
   });
 
