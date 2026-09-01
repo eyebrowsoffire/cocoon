@@ -239,10 +239,10 @@ class RedisCacheService extends CacheService {
       if (values is! List) {
         return List.filled(keys.length, null);
       }
-      return values.map((value) {
-        if (value == null) return null;
-        return base64.decode(value as String);
-      }).toList();
+      return [
+        for (final value in values)
+          value == null ? null : base64.decode(value as String)
+      ];
     } catch (e) {
       log.warn('Unable to retrieve multi-values from cache.', e);
       return List.filled(keys.length, null);
@@ -310,7 +310,7 @@ class RedisCacheService extends CacheService {
       if (values is! List || values.isEmpty) {
         return const {};
       }
-      return values.map((e) => e.toString()).toSet();
+      return {for (var e in values) '$e'};
     } catch (e) {
       log.warn('Unable to retrieve set for $key from cache.', e);
       return const {};
