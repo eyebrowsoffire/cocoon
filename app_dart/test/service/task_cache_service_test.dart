@@ -61,16 +61,6 @@ void main() {
       },
     );
 
-    test('evictTaskPayload purges item from cache', () async {
-      final task = generateTestTask(1);
-      await taskCache.cacheTaskPayloads([task]);
-
-      await taskCache.evictTaskPayload(docIdFor(task));
-      final result = await taskCache.getTaskPayloads([docIdFor(task)]);
-      expect(result.foundTasks, isEmpty);
-      expect(result.missingDocIds, contains(docIdFor(task)));
-    });
-
     test('getTaskPayloads correctly reports missing and found items', () async {
       final task1 = generateTestTask(1, name: 'Linux A');
       await taskCache.cacheTaskPayloads([task1]);

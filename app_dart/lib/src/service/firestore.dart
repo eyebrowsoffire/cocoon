@@ -192,8 +192,7 @@ mixin FirestoreQueries {
 
     final transaction = await beginTransaction();
     final response = await batchGetDocuments(docIds, transaction: transaction);
-    final docs =
-        response.map((element) => element.found).whereType<Document>();
+    final docs = response.map((element) => element.found).whereType<Document>();
     final tasksToUpdate = <Task>[];
 
     for (final doc in docs) {
@@ -385,8 +384,9 @@ mixin FirestoreQueries {
             )
             .toList();
         final response = await batchGetDocuments(missingNames);
-        final documents =
-            response.map((element) => element.found).whereType<Document>();
+        final documents = response
+            .map((element) => element.found)
+            .whereType<Document>();
         final fetchedMissingTasks = documents.map(Task.fromDocument).toList();
         if (fetchedMissingTasks.isNotEmpty) {
           await _taskCache!.cacheTaskPayloads(fetchedMissingTasks);
@@ -405,7 +405,13 @@ mixin FirestoreQueries {
     if (status != null) {
       result = result.where((t) => t.status == status).toList();
     }
-    result.sort((a, b) => b.createTimestamp.compareTo(a.createTimestamp));
+    result.sort((a, b) {
+      final timeComparison = b.createTimestamp.compareTo(a.createTimestamp);
+      if (timeComparison != 0) {
+        return timeComparison;
+      }
+      return b.currentAttempt.compareTo(a.currentAttempt);
+    });
     if (limit != null) {
       result = result.take(limit).toList();
     }

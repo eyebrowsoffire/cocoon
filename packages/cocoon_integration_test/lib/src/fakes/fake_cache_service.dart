@@ -43,7 +43,7 @@ class FakeCacheService extends CacheService {
   Future<bool> addToSetIfExists(
     String subcacheName,
     String key,
-    String value,
+    Set<String> values,
   ) async => false;
 
   @override

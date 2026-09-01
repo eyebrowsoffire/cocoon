@@ -119,12 +119,6 @@ final class TaskCacheService {
     await cache.insertVersioned('tasks', entries);
   }
 
-  /// Evicts a deleted task payload from Redis.
-  Future<void> evictTaskPayload(String docId) async {
-    if (!isEnabled) return;
-    await cache.purge('tasks', docId);
-  }
-
   /// Performs a batch lookup of task payloads by document IDs.
   Future<TaskPayloadLookupResult> getTaskPayloads(
     Iterable<String> docIds,
@@ -179,19 +173,9 @@ final class TaskCacheService {
     Iterable<String> taskIds, {
     Duration? ttl,
   }) async {
-    if (taskIds.isEmpty || !isEnabled) return false;
-    var allAdded = true;
-    for (final taskId in taskIds) {
-      final added = await cache.addToSetIfExists(
-        'tasks_by_commit_ids',
-        commitSha,
-        taskId,
-      );
-      if (!added) {
-        allAdded = false;
-      }
-    }
-    return allAdded;
+    final ids = taskIds.toSet();
+    if (ids.isEmpty || !isEnabled) return false;
+    return await cache.addToSetIfExists('tasks_by_commit_ids', commitSha, ids);
   }
 
   /// Initializes the commit task set if it does NOT already exist (`setIfNotExists`).

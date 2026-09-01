@@ -86,9 +86,13 @@ abstract class CacheService {
     Duration ttl = const Duration(hours: 12),
   });
 
-  /// Atomically adds [value] to the set at [key] in [subcacheName] if and only if the set already exists.
-  /// Returns `true` if the set existed and [value] was added, or `false` if the set did not exist.
-  Future<bool> addToSetIfExists(String subcacheName, String key, String value);
+  /// Atomically adds [values] to the set at [key] in [subcacheName] if and only if the set already exists.
+  /// Returns `true` if the set existed and [values] were added, or `false` if the set did not exist.
+  Future<bool> addToSetIfExists(
+    String subcacheName,
+    String key,
+    Set<String> values,
+  );
 
   /// Get value of [key] from the subcache [subcacheName]. If the key has no
   /// value, call [createFn] to create a value for it, set it, and return it.
@@ -241,7 +245,7 @@ class RedisCacheService extends CacheService {
       }
       return [
         for (final value in values)
-          value == null ? null : base64.decode(value as String)
+          value == null ? null : base64.decode(value as String),
       ];
     } catch (e) {
       log.warn('Unable to retrieve multi-values from cache.', e);
@@ -256,14 +260,15 @@ class RedisCacheService extends CacheService {
   ) async {
     if (entries.isEmpty) return;
     const insertVersionedScript = '''
-      local numKeys = tonumber(ARGV[1])
-      for i = 1, numKeys do
-        local key = KEYS[i]
-        local val = ARGV[1 + (i - 1) * 3 + 1]
-        local rev = tonumber(ARGV[1 + (i - 1) * 3 + 2])
-        local ttl = tonumber(ARGV[1 + (i - 1) * 3 + 3])
+      local numEntries = #KEYS / 2
+      for i = 1, numEntries do
+        local key = KEYS[2 * i - 1]
+        local revKey = KEYS[2 * i]
+        local offset = (i - 1) * 3
+        local val = ARGV[offset + 1]
+        local rev = tonumber(ARGV[offset + 2])
+        local ttl = tonumber(ARGV[offset + 3])
 
-        local revKey = "revisions/" .. key
         local existingRev = tonumber(redis.call("get", revKey) or 0)
         if rev > existingRev or redis.call("exists", key) == 0 then
           redis.call("set", key, val, "PX", ttl)
@@ -273,19 +278,24 @@ class RedisCacheService extends CacheService {
       return 1
     ''';
     const batchSize = 20;
+    final chunks = <Future<dynamic>>[];
     for (var i = 0; i < entries.length; i += batchSize) {
       final chunk = entries.sublist(i, min(i + batchSize, entries.length));
-      try {
-        final keys = chunk.map((e) => '$subcacheName/${e.key}').toList();
-        final args = [
-          chunk.length.toString(),
-          for (final e in chunk) ...[
-            base64.encode(e.value),
-            e.revisionId.toString(),
-            e.ttl.inMilliseconds.toString(),
-          ],
-        ];
-        await _runCommand(
+      final keys = <String>[];
+      for (final e in chunk) {
+        final redisKey = '$subcacheName/${e.key}';
+        keys.add(redisKey);
+        keys.add('revisions/$redisKey');
+      }
+      final args = [
+        for (final e in chunk) ...[
+          base64.encode(e.value),
+          e.revisionId.toString(),
+          e.ttl.inMilliseconds.toString(),
+        ],
+      ];
+      chunks.add(
+        _runCommand(
           (client) => client.send_object([
             'EVAL',
             insertVersionedScript,
@@ -293,10 +303,13 @@ class RedisCacheService extends CacheService {
             ...keys,
             ...args,
           ]),
-        );
-      } catch (e) {
-        log.warn('Unable to insert versioned entries into cache.', e);
-      }
+        ),
+      );
+    }
+    try {
+      await chunks.wait;
+    } catch (e) {
+      log.warn('Unable to insert versioned entries into cache.', e);
     }
   }
 
@@ -359,11 +372,14 @@ class RedisCacheService extends CacheService {
   Future<bool> addToSetIfExists(
     String subcacheName,
     String key,
-    String value,
+    Set<String> values,
   ) async {
+    if (values.isEmpty) return false;
     const addToSetScript = '''
       if redis.call("exists", KEYS[1]) == 1 then
-        redis.call("sadd", KEYS[1], ARGV[1])
+        for i = 1, #ARGV do
+          redis.call("sadd", KEYS[1], ARGV[i])
+        end
         return 1
       end
       return 0
@@ -371,8 +387,13 @@ class RedisCacheService extends CacheService {
     final redisKey = '$subcacheName/$key';
     try {
       final response = await _runCommand(
-        (client) =>
-            client.send_object(['EVAL', addToSetScript, '1', redisKey, value]),
+        (client) => client.send_object([
+          'EVAL',
+          addToSetScript,
+          '1',
+          redisKey,
+          ...values,
+        ]),
       );
       return response == 1 || response == '1';
     } catch (e) {
@@ -640,14 +661,15 @@ class InMemoryCacheService extends CacheService {
   Future<bool> addToSetIfExists(
     String subcacheName,
     String key,
-    String value,
+    Set<String> values,
   ) async {
+    if (values.isEmpty) return false;
     await _mutex.acquire();
     try {
       final cacheKey = '$subcacheName/$key';
       final existing = _sets[cacheKey];
       if (existing != null && !existing.isExpired) {
-        existing.values.add(value);
+        existing.values.addAll(values);
         return true;
       }
       return false;

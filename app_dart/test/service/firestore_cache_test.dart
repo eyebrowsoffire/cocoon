@@ -232,5 +232,47 @@ void main() {
       expect(cachedTask2, isNotNull);
       expect(cachedTask3, isNotNull);
     });
+
+    test(
+      'queryTasksByCommitCached sorts by createTimestamp and currentAttempt descending',
+      () async {
+        final task1 = generateFirestoreTask(
+          1,
+          commitSha: commitSha,
+          created: DateTime.fromMillisecondsSinceEpoch(1000),
+          attempts: 1,
+          name: 'Linux A',
+        );
+        final task2 = generateFirestoreTask(
+          2,
+          commitSha: commitSha,
+          created: DateTime.fromMillisecondsSinceEpoch(1000),
+          attempts: 2,
+          name: 'Linux A',
+        );
+        final task3 = generateFirestoreTask(
+          3,
+          commitSha: commitSha,
+          created: DateTime.fromMillisecondsSinceEpoch(2000),
+          attempts: 1,
+          name: 'Linux B',
+        );
+        firestore.putDocument(task1);
+        firestore.putDocument(task2);
+        firestore.putDocument(task3);
+
+        final tasks = await firestore.queryRecentTasksByCommit(
+          commitSha: commitSha,
+        );
+        expect(tasks.length, 3);
+        // task3 has highest createTimestamp (2000)
+        expect(tasks[0].taskName, 'Linux B');
+        // task2 and task1 have same createTimestamp (1000), but task2 has higher attempt (2)
+        expect(tasks[1].taskName, 'Linux A');
+        expect(tasks[1].currentAttempt, 2);
+        expect(tasks[2].taskName, 'Linux A');
+        expect(tasks[2].currentAttempt, 1);
+      },
+    );
   });
 }
