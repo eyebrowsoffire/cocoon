@@ -205,10 +205,7 @@ abc_test.sh @ghi @flutter/framework
         flakyNumber: 5,
         totalNumber: 10,
       );
-      final ownership = TestOwnership(
-        'owner',
-        Team.framework,
-      );
+      final ownership = TestOwnership('owner', Team.framework);
       final issueBuilderBringupFalse = IssueBuilder(
         statistic: statistic,
         ownership: ownership,
