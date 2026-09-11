@@ -91,7 +91,7 @@ final class TaskCacheService {
   final Config? config;
 
   /// Returns whether caching is enabled in dynamic config.
-  bool get isEnabled => config?.flags.taskCachingEnabled ?? true;
+  bool get isEnabled => config?.flags.taskCachingEnabled ?? false;
 
   /// Returns the default cache TTL based on dynamic configuration.
   Duration get defaultTtl =>

@@ -43,7 +43,7 @@ final class DynamicConfig {
     orderedPresubmit: OrderedPresubmit.defaultInstance,
     dynamicTestSuppression: false,
     geminiModel: 'gemini-3-flash-preview',
-    taskCachingEnabled: true,
+    taskCachingEnabled: false,
     taskCacheTtlInHours: 12,
   );
 

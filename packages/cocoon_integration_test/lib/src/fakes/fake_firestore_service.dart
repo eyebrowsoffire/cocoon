@@ -25,10 +25,13 @@ final queryKeyValidator = RegExp(r'(^[a-zA-Z_][a-zA-Z_0-9]*)$');
 abstract base class _FakeInMemoryFirestoreService
     with FirestoreQueries
     implements FirestoreService {
-  _FakeInMemoryFirestoreService({this.cache});
+  _FakeInMemoryFirestoreService({this.cache, this.config});
 
   @override
   final CacheService? cache;
+
+  @override
+  final Config? config;
 
   /// Every document currently stored in the fake.
   Iterable<Document> get documents => _documents.values;
@@ -217,7 +220,7 @@ abstract base class _FakeInMemoryFirestoreService
       } else if (transform.increment case final inc?) {
         if (field?.integerValue case final oldVal?) {
           final newVal = int.parse(oldVal) + int.parse(inc.integerValue!);
-          fields[transform.fieldPath!] = Value(integerValue: newVal.toString());
+          fields[transform.fieldPath!] = newVal.toValue();
         } else {
           fields[transform.fieldPath!] = Value(integerValue: inc.integerValue!);
         }
@@ -712,7 +715,7 @@ abstract base class _FakeInMemoryFirestoreService
 
 /// A fake implementation of [FirestoreService].
 final class FakeFirestoreService extends _FakeInMemoryFirestoreService {
-  FakeFirestoreService({super.cache});
+  FakeFirestoreService({super.cache, super.config});
 }
 
 /// Checks that the models described by [metadata] match storage of [matcher].

@@ -7,6 +7,7 @@ import 'package:cocoon_integration_test/testing.dart';
 import 'package:cocoon_server_test/test_logging.dart';
 import 'package:cocoon_service/src/model/firestore/task.dart';
 import 'package:cocoon_service/src/service/cache_service.dart';
+import 'package:cocoon_service/src/service/flags/dynamic_config.dart';
 
 import 'package:googleapis/firestore/v1.dart';
 import 'package:path/path.dart' as p;
@@ -22,7 +23,10 @@ void main() {
 
     setUp(() {
       cache = CacheService.inMemory();
-      firestore = FakeFirestoreService(cache: cache);
+      final config = FakeConfig(
+        dynamicConfig: DynamicConfig(taskCachingEnabled: true),
+      );
+      firestore = FakeFirestoreService(cache: cache, config: config);
     });
 
     test(

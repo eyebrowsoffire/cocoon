@@ -183,7 +183,7 @@ final class RerunProdTask extends ApiRequestHandler {
     ).withMostRecentTaskOnly().tasks;
 
     final wasMarkedNew = <String>[];
-    final tasksToUpdate = <fs.Task>[];
+    final updatedTasks = <fs.Task>[];
     final createdTasks = <fs.Task>[];
 
     final Future<void> cancelRunningTasks;
@@ -211,21 +211,22 @@ final class RerunProdTask extends ApiRequestHandler {
       if (task.status == TaskStatus.inProgress) {
         // Mark current attempt cancelled with incremented revisionId
         task.setStatus(TaskStatus.cancelled);
-        tasksToUpdate.add(task);
+        updatedTasks.add(task);
       }
 
       // Start a new task attempt
       final retryTask = task.createRetry(now: _now());
-      tasksToUpdate.add(retryTask);
       createdTasks.add(retryTask);
     }
 
-    final writes = documentsToWrites(tasksToUpdate);
+    final writes = documentsToWrites([...updatedTasks, ...createdTasks]);
     await Future.wait([
       cancelRunningTasks,
       _firestore.commit(transaction, writes),
     ]);
-    await _firestore.cacheTaskPayloads(tasksToUpdate);
+    if (updatedTasks.isNotEmpty) {
+      await _firestore.cacheTaskPayloads(updatedTasks);
+    }
     if (createdTasks.isNotEmpty) {
       await _firestore.updateCacheForCreatedTasks(createdTasks);
     }

@@ -65,9 +65,10 @@ abstract class CacheService {
     Duration ttl = const Duration(minutes: 1),
   });
 
-  /// Atomically inserts multiple [entries] into [subcacheName] in a single batch API call
-  /// if and only if their [VersionedCacheEntry.revisionId] is strictly greater than any
-  /// existing cached revision for that key.
+  /// Atomically inserts multiple [entries] into [subcacheName] in a batch API call.
+  /// Each entry is written if and only if its [VersionedCacheEntry.revisionId] is
+  /// strictly greater than any existing cached revision for that key (or if the
+  /// key does not yet exist in the cache).
   Future<void> insertVersioned(
     String subcacheName,
     List<VersionedCacheEntry> entries,

@@ -59,12 +59,15 @@ mixin FirestoreQueries {
   CacheService? get cache => null;
   Config? get config => null;
 
+  TaskCacheService? _cachedTaskCacheService;
+
   /// Lazy accessor for [TaskCacheService].
   TaskCacheService? get _taskCache {
-    if (cache == null || !(config?.flags.taskCachingEnabled ?? true)) {
+    if (cache == null || !(config?.flags.taskCachingEnabled ?? false)) {
       return null;
     }
-    return TaskCacheService(cache: cache!, config: config);
+    return _cachedTaskCacheService ??=
+        TaskCacheService(cache: cache!, config: config);
   }
 
   Future<Document> getDocument(String name, {Transaction? transaction});
@@ -120,18 +123,19 @@ mixin FirestoreQueries {
       orderMap: {Task.fieldCreateTimestamp: kQueryOrderDescending},
     );
     final tasks = documents.map(Task.fromDocument).toList();
-    if (_taskCache != null) {
+    final taskCache = _taskCache;
+    if (taskCache != null) {
       final docIds = {for (final t in tasks) p.basename(t.name!)};
       await [
-        _taskCache!.cacheTaskPayloads(tasks),
+        taskCache.cacheTaskPayloads(tasks),
         if (docIds.isNotEmpty)
           () async {
-            final initialized = await _taskCache!.initializeCommitTaskSet(
+            final initialized = await taskCache.initializeCommitTaskSet(
               commitSha,
               docIds,
             );
             if (!initialized) {
-              await _taskCache!.addTasksToCommitSet(commitSha, docIds);
+              await taskCache.addTasksToCommitSet(commitSha, docIds);
             }
           }(),
       ].wait;
@@ -141,8 +145,9 @@ mixin FirestoreQueries {
 
   /// Explicitly updates the cache when new [Task]s are created.
   Future<void> updateCacheForCreatedTasks(List<Task> tasks) async {
-    if (_taskCache == null || tasks.isEmpty) return;
-    await _taskCache!.cacheTaskPayloads(tasks);
+    final taskCache = _taskCache;
+    if (taskCache == null || tasks.isEmpty) return;
+    await taskCache.cacheTaskPayloads(tasks);
 
     final tasksByCommit = <String, Set<String>>{};
     for (final task in tasks) {
@@ -155,7 +160,7 @@ mixin FirestoreQueries {
     for (final entry in tasksByCommit.entries) {
       final commitSha = entry.key;
       final docIds = entry.value;
-      final setExisted = await _taskCache!.addTasksToCommitSet(
+      final setExisted = await taskCache.addTasksToCommitSet(
         commitSha,
         docIds,
       );
@@ -316,6 +321,7 @@ mixin FirestoreQueries {
       );
     }
 
+    // For tasks, therer is no reason to _not_ order this way.
     final orderMap = {Task.fieldCreateTimestamp: kQueryOrderDescending};
     final documents = await query(
       kTaskCollectionId,
@@ -325,8 +331,9 @@ mixin FirestoreQueries {
       transaction: transaction,
     );
     final tasks = documents.map(Task.fromDocument).toList();
-    if (cacheResults && transaction == null && _taskCache != null) {
-      await _taskCache!.cacheTaskPayloads(tasks);
+    final taskCache = _taskCache;
+    if (cacheResults && transaction == null && taskCache != null) {
+      await taskCache.cacheTaskPayloads(tasks);
     }
     return tasks;
   }
@@ -340,7 +347,7 @@ mixin FirestoreQueries {
   }) async {
     if (transaction == null &&
         cache != null &&
-        (config?.flags.taskCachingEnabled ?? true)) {
+        (config?.flags.taskCachingEnabled ?? false)) {
       return await _queryTasksByCommitCached(
         commitSha: commitSha,
         name: name,
@@ -364,10 +371,21 @@ mixin FirestoreQueries {
     TaskStatus? status,
     int? limit,
   }) async {
+    final taskCache = _taskCache;
+    if (taskCache == null) {
+      return await _queryTasksFromFirestore(
+        commitSha: commitSha,
+        name: name,
+        status: status,
+        limit: limit,
+        cacheResults: false,
+      );
+    }
+
     List<Task>? tasks;
-    final docIds = await _taskCache!.getTaskIdsForCommit(commitSha);
+    final docIds = await taskCache.getTaskIdsForCommit(commitSha);
     if (docIds != null && docIds.isNotEmpty) {
-      final lookupResult = await _taskCache!.getTaskPayloads(docIds);
+      final lookupResult = await taskCache.getTaskPayloads(docIds);
       final foundTasks = lookupResult.foundTasks;
 
       if (lookupResult.missingDocIds.isEmpty) {
@@ -389,7 +407,7 @@ mixin FirestoreQueries {
             .whereType<Document>();
         final fetchedMissingTasks = documents.map(Task.fromDocument).toList();
         if (fetchedMissingTasks.isNotEmpty) {
-          await _taskCache!.cacheTaskPayloads(fetchedMissingTasks);
+          await taskCache.cacheTaskPayloads(fetchedMissingTasks);
           foundTasks.addAll(fetchedMissingTasks);
         }
         tasks = foundTasks;
@@ -615,7 +633,7 @@ class FirestoreService with FirestoreQueries {
     );
   }
 
-  const FirestoreService._(this._api, {this.cache, this.config});
+  FirestoreService._(this._api, {this.cache, this.config});
   final FirestoreApi _api;
 
   @override

@@ -1214,6 +1214,7 @@ class LuciBuildService {
     task.setStatus(TaskStatus.inProgress);
 
     await _firestore.updateTasks([task]);
+    await _firestore.updateCacheForCreatedTasks([task]);
 
     return task.currentAttempt;
   }
