@@ -66,8 +66,10 @@ mixin FirestoreQueries {
     if (cache == null || !(config?.flags.taskCachingEnabled ?? false)) {
       return null;
     }
-    return _cachedTaskCacheService ??=
-        TaskCacheService(cache: cache!, config: config);
+    return _cachedTaskCacheService ??= TaskCacheService(
+      cache: cache!,
+      config: config,
+    );
   }
 
   Future<Document> getDocument(String name, {Transaction? transaction});
@@ -160,10 +162,7 @@ mixin FirestoreQueries {
     for (final entry in tasksByCommit.entries) {
       final commitSha = entry.key;
       final docIds = entry.value;
-      final setExisted = await taskCache.addTasksToCommitSet(
-        commitSha,
-        docIds,
-      );
+      final setExisted = await taskCache.addTasksToCommitSet(commitSha, docIds);
       if (!setExisted) {
         // Set was missing in Redis: fall back to full database query to populate set
         await _fetchAndCacheCommitTasks(commitSha);
